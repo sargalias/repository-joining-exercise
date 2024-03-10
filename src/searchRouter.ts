@@ -1,17 +1,13 @@
 import express from 'express';
 import { Hotel, hotelRepository } from './repositories/hotelRepository';
 import { differenceInBusinessDays, isAfter, isBefore, isEqual } from 'date-fns';
-import {
-  SearchOrder,
-  SearchRequest,
-  SearchResultHotel,
-  SearchResultOffer,
-} from './search';
+import { SearchOrder, SearchRequest, SearchResultHotel } from './search';
 import {
   Experience,
   experienceRepository,
 } from './repositories/experienceRepository';
 import { Offer, offerRepository } from './repositories/offerRepository';
+import { append, compose, filter, flip, map, transduce } from 'ramda';
 
 const _hotelRepository = hotelRepository();
 const _experienceRepository = experienceRepository();
@@ -26,43 +22,48 @@ router.post('', async (req, res) => {
   const experiences = await _experienceRepository.get();
   const offers = await _offerRepository.get();
 
-  const filteredHotels = filterHotels({ from, to }, hotels);
-  const withExperiences = filteredHotels.map((hotel) =>
-    addExperiences(hotel, experiences),
-  );
-  const withOffers = withExperiences.map((hotel) =>
-    addOffers(hotel, travellers, from, to, offers),
-  );
-  const withCostsAndDiscounts = withOffers.map((hotel) =>
-    addCostsAndDiscounts(hotel, travellers, from, to),
+  const filteredHotels = filter((hotel: Hotel): boolean =>
+    filterHotel({ from, to }, hotel),
+  )(hotels);
+
+  // @ts-ignore due to tranducing, the functions will run in the wrong order, so this completely messes up the typings
+  const transducer: (arg: readonly Hotel[]) => SearchResultHotel[] = compose(
+    map(
+      (hotel: Hotel): HotelWithExperiences =>
+        addExperiences(hotel, experiences),
+    ),
+    map(
+      (hotel: HotelWithExperiences): HotelWithOffers =>
+        addOffers(hotel, travellers, from, to, offers),
+    ),
+    map(
+      (hotel: HotelWithOffers): HotelWithPrices =>
+        addCostsAndDiscounts(hotel, travellers, from, to),
+    ),
+    map((hotel: HotelWithPrices): SearchResultHotel => toViewModel(hotel)),
   );
 
-  const viewModelResults = withCostsAndDiscounts.map((hotel) =>
-    toViewModel(hotel),
+  const results = <SearchResultHotel[]>(
+    transduce(transducer, flip(append), [], filteredHotels)
   );
 
   const sorter = createSorter(orderBy);
-  const sorted = viewModelResults.sort(sorter);
+  const sorted = results.sort(sorter);
 
   res.send(sorted);
 });
 
-const filterHotels = (
+const filterHotel = (
   filters: { from: string; to: string },
-  hotels: Hotel[],
-): Hotel[] => {
+  hotel: Hotel,
+): boolean => {
   const { from, to } = filters;
-  const results = hotels.filter((hotel) => {
-    return hotel.availability.some((availability) => {
-      return (
-        (isEqual(from, availability.from) ||
-          isAfter(from, availability.from)) &&
-        (isEqual(from, availability.from) || isBefore(to, availability.to))
-      );
-    });
+  return hotel.availability.some((availability) => {
+    return (
+      (isEqual(from, availability.from) || isAfter(from, availability.from)) &&
+      (isEqual(from, availability.from) || isBefore(to, availability.to))
+    );
   });
-
-  return results;
 };
 
 type HotelWithExperiences = Hotel & { experiences: string[] };
@@ -90,7 +91,7 @@ const addOffers = (
   to: string,
   offers: Offer[],
 ): HotelWithOffers => {
-  return {
+  const result = {
     ...hotel,
     offers: offers.filter((offer) => {
       return (
@@ -101,6 +102,7 @@ const addOffers = (
       );
     }),
   };
+  return result;
 };
 
 type HotelWithPrices = HotelWithOffers & {
